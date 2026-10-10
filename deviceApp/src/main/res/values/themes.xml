@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/sweatiq_bg</item>
+        <item name="android:colorBackground">@color/sweatiq_bg</item>
+        <item name="android:statusBarColor">@color/sweatiq_bg</item>
+        <item name="android:navigationBarColor">@color/sweatiq_bg</item>
+    </style>
+</resources>
