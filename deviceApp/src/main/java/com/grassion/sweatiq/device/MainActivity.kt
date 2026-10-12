@@ -3,7 +3,9 @@ package com.grassion.sweatiq.device
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -41,6 +43,10 @@ class MainActivity : Activity() {
     private var relayUp = false
     private var relayLabel = "connecting"
 
+    // pod pairing state (kept while the app stays open)
+    private var podConnected = false
+    private var podName = "SIQ-7823"
+
     private val readings = ArrayList<Reading>()
     private var lastSeq = 0
     private var lastTs = 0L
@@ -71,6 +77,51 @@ class MainActivity : Activity() {
     private var trendRate: LineChartView? = null
     private var rowsBox: LinearLayout? = null
     private var relayChip: TextView? = null
+    private var operatorLinked = false
+    private var codeLinkChip: TextView? = null
+    private var codeOpChip: TextView? = null
+
+    /** Expanding rings shown while scanning for the pod. */
+    private class PulseView(ctx: Context) : View(ctx) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var t = 0f
+        private val anim = ValueAnimator.ofFloat(0f, 1f)
+
+        init {
+            anim.duration = 1800
+            anim.repeatCount = ValueAnimator.INFINITE
+            anim.addUpdateListener {
+                t = it.animatedValue as Float
+                invalidate()
+            }
+        }
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            anim.start()
+        }
+
+        override fun onDetachedFromWindow() {
+            anim.cancel()
+            super.onDetachedFromWindow()
+        }
+
+        override fun onDraw(c: Canvas) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val maxR = Math.min(cx, cy)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3f
+            for (i in 0..2) {
+                val f = (t + i / 3f) % 1f
+                paint.color = Color.argb(((1f - f) * 160).toInt(), 45, 212, 191)
+                c.drawCircle(cx, cy, maxR * (0.3f + 0.7f * f), paint)
+            }
+            paint.style = Paint.Style.FILL
+            paint.color = Pal.ACCENT
+            c.drawCircle(cx, cy, maxR * 0.2f, paint)
+        }
+    }
 
     private class MetricCard(val value: TextView, val delta: TextView, val spark: LineChartView)
 
@@ -95,6 +146,7 @@ class MainActivity : Activity() {
         root = FrameLayout(this)
         root.setBackgroundColor(Pal.BG)
         setContentView(root)
+        newCode()
         showSplash()
     }
 
@@ -178,7 +230,70 @@ class MainActivity : Activity() {
         a.duration = 2000
         a.addUpdateListener { pb.progress = it.animatedValue as Int }
         a.start()
-        h.postDelayed({ showHome() }, 2200)
+        h.postDelayed({ showCodeScreen() }, 2200)
+    }
+
+    // ------------------------------------------------------------------ 1b. control code (shown once, at the very start)
+
+    private fun newCode() {
+        code = (100000 + (Math.random() * 899999).toInt()).toString()
+        operatorLinked = false
+        startLink()
+    }
+
+    private fun refreshCodeChips() {
+        codeLinkChip?.let {
+            it.text = if (relayUp) "DATA CHANNEL - CONNECTED" else "DATA CHANNEL - CONNECTING"
+        }
+        codeOpChip?.let {
+            it.text = if (operatorLinked) "OPERATOR LINKED" else "WAITING FOR OPERATOR"
+            it.setTextColor(if (operatorLinked) Pal.OK else Pal.WARN)
+        }
+    }
+
+    private fun showCodeScreen() {
+        back = null
+        val p = page()
+        p.addView(header("Control Code", "Set this up once, before the demo starts"))
+
+        val c = card(18)
+        c.gravity = Gravity.CENTER_HORIZONTAL
+        c.addView(fieldLabel("Enter this code on the SweatIQ Control phone"))
+        val ct = tv(code.substring(0, 3) + " " + code.substring(3), 44f, Pal.ACCENT, true, Gravity.CENTER)
+        ct.letterSpacing = 0.12f
+        c.addView(ct, lp(MATCH, WRAP, 0f, 0, 14, 0, 14))
+        val chips = vbox()
+        chips.gravity = Gravity.CENTER_HORIZONTAL
+        val a = chip("DATA CHANNEL - CONNECTING", Pal.OK)
+        val b = chip("WAITING FOR OPERATOR", Pal.WARN)
+        codeLinkChip = a
+        codeOpChip = b
+        chips.addView(a, lp(WRAP, WRAP, 0f, 0, 0, 0, 8))
+        chips.addView(b, lp(WRAP, WRAP))
+        c.addView(chips)
+        p.addView(c)
+        p.addView(space(14))
+
+        val how = card()
+        how.addView(tv("How it works", 14f, Pal.TEXT, true))
+        how.addView(tv("1. On the Control phone, open SweatIQ Control and type this code.", 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 8, 0, 0))
+        how.addView(tv("2. Wait until this screen says OPERATOR LINKED.", 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
+        how.addView(tv("3. Tap Continue. The code will not appear again during the demo.", 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
+        p.addView(how)
+        p.addView(space(18))
+
+        p.addView(button("Continue") {
+            codeLinkChip = null
+            codeOpChip = null
+            showHome()
+        })
+        p.addView(space(8))
+        p.addView(button("Generate new code", false) {
+            newCode()
+            showCodeScreen()
+        })
+        show(p)
+        refreshCodeChips()
     }
 
     // ------------------------------------------------------------------ 2. home
@@ -193,21 +308,10 @@ class MainActivity : Activity() {
         p.addView(top)
         p.addView(space(20))
 
-        val dev = card()
-        val drow = hbox()
-        val pod = vbox()
-        pod.addView(tv("SweatIQ Pod", 18f, Pal.TEXT, true))
-        pod.addView(tv("Not connected - start a session to link", 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
-        drow.addView(LogoView(this, false), lp(dp(54), dp(54), 0f, 0, 0, 14, 0))
-        drow.addView(pod, lp(0, WRAP, 1f))
-        dev.addView(drow)
-        dev.addView(space(12))
-        val st = hbox()
-        st.addView(chip("Na+ ready", Pal.NA), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
-        st.addView(chip("K+ ready", Pal.K), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
-        st.addView(chip("Cl- ready", Pal.CL))
-        dev.addView(st)
-        p.addView(dev)
+        p.addView(deviceStatusCard())
+        p.addView(space(10))
+        p.addView(chip(if (operatorLinked) "OPERATOR LINKED" else "OPERATOR NOT LINKED YET",
+            if (operatorLinked) Pal.OK else Pal.WARN), lp(WRAP, WRAP))
         p.addView(space(16))
 
         p.addView(button("Start New Session") { showRegister() })
@@ -231,10 +335,33 @@ class MainActivity : Activity() {
         show(p)
     }
 
+    private fun deviceStatusCard(): LinearLayout {
+        val dev = card()
+        val drow = hbox()
+        val pod = vbox()
+        pod.addView(tv("SweatIQ Pod", 18f, Pal.TEXT, true))
+        if (podConnected) {
+            pod.addView(tv(podName + " - Connected, ready", 12f, Pal.OK, true), lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
+        } else {
+            pod.addView(tv("Not connected - pair your pod", 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
+        }
+        drow.addView(LogoView(this, false), lp(dp(54), dp(54), 0f, 0, 0, 14, 0))
+        drow.addView(pod, lp(0, WRAP, 1f))
+        if (podConnected) drow.addView(chip("Battery 87%", Pal.OK))
+        dev.addView(drow)
+        dev.addView(space(12))
+        val st = hbox()
+        val on = podConnected
+        st.addView(chip(if (on) "Na+ ready" else "Na+ --", if (on) Pal.NA else Pal.MUTED), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
+        st.addView(chip(if (on) "K+ ready" else "K+ --", if (on) Pal.K else Pal.MUTED), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
+        st.addView(chip(if (on) "Cl- ready" else "Cl- --", if (on) Pal.CL else Pal.MUTED))
+        dev.addView(st)
+        dev.addView(space(12))
+        dev.addView(button(if (on) "Manage pod" else "Connect Pod", false) { showPairing(false) })
+        return dev
+    }
+
     private fun resetSessionState() {
-        link?.stop()
-        link = null
-        relayUp = false
         readings.clear()
         lastSeq = 0
         lastTs = 0
@@ -246,6 +373,11 @@ class MainActivity : Activity() {
         pausedAccum = 0
         ended = false
         h.removeCallbacks(tick)
+        // the data channel stays up between sessions; just tell the operator we are idle again
+        if (relayUp) {
+            link?.send("reading", "", true)
+            publishState("WAITING")
+        }
     }
 
     // ------------------------------------------------------------------ 3. athlete registration
@@ -273,7 +405,6 @@ class MainActivity : Activity() {
             athleteId = idF.text.toString().trim().ifEmpty { "ATH-001" }
             athleteName = nameF.text.toString().trim().ifEmpty { "Demo Athlete" }
             age = ageF.text.toString().trim().ifEmpty { "24" }
-            code = (100000 + (Math.random() * 899999).toInt()).toString()
             showConnect()
         })
         show(p)
@@ -306,6 +437,7 @@ class MainActivity : Activity() {
         val was = relayUp
         relayUp = up
         relayLabel = label
+        refreshCodeChips()
         relayChip?.let {
             it.text = if (up) "DATA CHANNEL - CONNECTED" else "DATA CHANNEL - RECONNECTING"
         }
@@ -319,57 +451,134 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showConnect() {
-        back = { showRegister() }
-        startLink()
+    private fun showConnect() = showPairing(true)
+
+    /** Pod pairing: scanning -> available pods -> connecting -> Device Ready. */
+    private fun showPairing(forSession: Boolean) {
+        if (forSession) back = { showRegister() } else back = { showHome() }
         val p = page()
-        p.addView(header("Connect Device", "Link the SweatIQ Pod to this phone"))
+        p.addView(header("Connect Your SweatIQ Pod", "Make sure the pod is powered on and nearby"))
 
-        val codeCard = card()
-        codeCard.addView(fieldLabel("Session code"))
-        val ct = tv(code.substring(0, 3) + " " + code.substring(3), 34f, Pal.ACCENT, true)
-        ct.letterSpacing = 0.12f
-        codeCard.addView(ct, lp(MATCH, WRAP, 0f, 0, 8, 0, 6))
-        codeCard.addView(tv("Share this code with the SweatIQ operator to start the data feed.", 12f, Pal.MUTED))
-        p.addView(codeCard)
-        p.addView(space(14))
-
-        val pod = card()
-        val head = hbox()
-        head.addView(LogoView(this, false), lp(dp(48), dp(48), 0f, 0, 0, 12, 0))
-        val col = vbox()
-        col.addView(tv("SweatIQ Pod", 17f, Pal.TEXT, true))
-        val status = tv("Scanning for nearby devices...", 12f, Pal.MUTED)
-        col.addView(status, lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
-        head.addView(col, lp(0, WRAP, 1f))
-        pod.addView(head)
-        pod.addView(space(12))
-        val chips = hbox()
-        val c1 = chip("SIQ-7823", Pal.MUTED)
-        val c2 = chip("DEMO LINK", Pal.WARN)
-        chips.addView(c1, lp(WRAP, WRAP, 0f, 0, 0, 8, 0))
-        chips.addView(c2)
-        pod.addView(chips)
-        p.addView(pod)
-        p.addView(space(14))
-
-        val chan = chip(if (relayUp) "DATA CHANNEL - CONNECTED" else "DATA CHANNEL - CONNECTING", Pal.OK)
-        relayChip = chan
-        p.addView(chan, lp(WRAP, WRAP))
-        p.addView(space(24))
-
-        val cont = button("Continue") { showInit() }
-        cont.alpha = 0.35f
-        cont.isEnabled = false
-        p.addView(cont)
+        val area = vbox()
+        p.addView(area)
         show(p)
 
-        h.postDelayed({
-            status.text = "Connected - signal stable"
-            status.setTextColor(Pal.OK)
-            cont.alpha = 1f
-            cont.isEnabled = true
-        }, 1800)
+        val names = listOf("SIQ-7823", "SIQ-5610")
+        val strengths = listOf("Strong", "Weak")
+        val strengthColors = listOf(Pal.OK, Pal.WARN)
+        var sel = 0
+
+        fun render(phase: Int) {
+            area.removeAllViews()
+            when (phase) {
+                0 -> {
+                    val c = card()
+                    c.gravity = Gravity.CENTER_HORIZONTAL
+                    c.addView(PulseView(this), lp(dp(170), dp(170)))
+                    c.addView(tv("Scanning for nearby SweatIQ pods...", 14f, Pal.MUTED, false, Gravity.CENTER),
+                        lp(MATCH, WRAP, 0f, 0, 8, 0, 6))
+                    area.addView(c)
+                    h.postDelayed({ render(1) }, 2000)
+                }
+                1 -> {
+                    area.addView(tv("Available devices", 15f, Pal.TEXT, true), lp(MATCH, WRAP, 0f, 0, 0, 0, 10))
+                    for (i in names.indices) {
+                        val row = card(12)
+                        row.background = if (i == sel) bg(Color.argb(30, 45, 212, 191), 16, Pal.ACCENT, 1)
+                        else bg(Pal.SURFACE, 16, Pal.STROKE, 1)
+                        val hb = hbox()
+                        hb.addView(LogoView(this, false), lp(dp(40), dp(40), 0f, 0, 0, 12, 0))
+                        val col = vbox()
+                        col.addView(tv("SweatIQ Pod", 15f, Pal.TEXT, true))
+                        col.addView(tv(names[i], 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 3, 0, 0))
+                        hb.addView(col, lp(0, WRAP, 1f))
+                        hb.addView(chip("Signal: " + strengths[i], strengthColors[i]))
+                        row.addView(hb)
+                        row.isClickable = true
+                        row.setOnClickListener { sel = i; render(1) }
+                        area.addView(row, lp(MATCH, WRAP, 0f, 0, 0, 0, 10))
+                    }
+                    area.addView(space(6))
+                    area.addView(button("Connect") { render(2) })
+                    area.addView(space(8))
+                    area.addView(button("Rescan", false) { render(0) })
+                    area.addView(space(12))
+                    area.addView(tv("Having trouble? Check that the pod is switched on and charged.", 12f, Pal.MUTED, false, Gravity.CENTER))
+                }
+                2 -> {
+                    val name = names[sel]
+                    val c = card()
+                    c.addView(tv("Pairing with SweatIQ Pod " + name, 16f, Pal.TEXT, true))
+                    val steps = listOf("Pairing", "Checking firmware", "Starting Na+, K+ and Cl- channels")
+                    val marks = ArrayList<TextView>()
+                    for (st in steps) {
+                        val r = hbox()
+                        val m = tv("...", 13f, Pal.MUTED, true)
+                        r.addView(tv(st, 13f, Pal.TEXT), lp(0, WRAP, 1f))
+                        r.addView(m)
+                        marks.add(m)
+                        c.addView(r, lp(MATCH, WRAP, 0f, 0, 14, 0, 0))
+                    }
+                    area.addView(c)
+                    for (i in steps.indices) {
+                        h.postDelayed({ marks[i].text = "Done"; marks[i].setTextColor(Pal.OK) }, (i * 800 + 700).toLong())
+                    }
+                    h.postDelayed({
+                        podConnected = true
+                        podName = name
+                        render(3)
+                    }, 2600)
+                }
+                else -> {
+                    val c = card()
+                    val top = hbox()
+                    val tick = tv("OK", 14f, Pal.OK, true, Gravity.CENTER)
+                    tick.background = bg(Color.argb(30, 52, 211, 153), 26, Pal.OK, 2)
+                    top.addView(tick, lp(dp(52), dp(52), 0f, 0, 0, 14, 0))
+                    val col = vbox()
+                    col.addView(tv("Device Ready", 22f, Pal.OK, true))
+                    col.addView(tv("SweatIQ Pod " + podName + " is connected", 12f, Pal.MUTED), lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
+                    top.addView(col, lp(0, WRAP, 1f))
+                    c.addView(top)
+                    c.addView(space(14))
+                    fun kv(k: String, v: String, vc: Int) {
+                        val r = hbox()
+                        r.addView(tv(k, 13f, Pal.MUTED), lp(0, WRAP, 1f))
+                        r.addView(tv(v, 13f, vc, true))
+                        c.addView(r, lp(MATCH, WRAP, 0f, 0, 0, 0, 8))
+                    }
+                    kv("Status", "Connected", Pal.OK)
+                    kv("Signal", "Stable", Pal.OK)
+                    kv("Battery", "87%", Pal.OK)
+                    kv("Firmware", "1.0.3", Pal.TEXT)
+                    kv("Sensor channels", "Initialised", Pal.OK)
+                    val chips = hbox()
+                    chips.addView(chip("Na+ Ready", Pal.NA), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
+                    chips.addView(chip("K+ Ready", Pal.K), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
+                    chips.addView(chip("Cl- Ready", Pal.CL), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
+                    chips.addView(chip("DEMO LINK", Pal.WARN))
+                    c.addView(chips, lp(MATCH, WRAP, 0f, 0, 4, 0, 0))
+                    area.addView(c)
+                    area.addView(space(14))
+                    if (forSession) {
+                        val chan = chip(if (relayUp) "DATA CHANNEL - CONNECTED" else "DATA CHANNEL - CONNECTING", Pal.OK)
+                        relayChip = chan
+                        area.addView(chan, lp(WRAP, WRAP))
+                        area.addView(space(18))
+                        area.addView(button("Continue") { showInit() })
+                    } else {
+                        area.addView(button("Done") { showHome() })
+                    }
+                    area.addView(space(8))
+                    area.addView(button("Disconnect pod", false, Pal.BAD) {
+                        podConnected = false
+                        render(0)
+                    })
+                }
+            }
+        }
+
+        if (podConnected) render(3) else render(0)
     }
 
     // ------------------------------------------------------------------ 5. sensor initialisation
@@ -440,6 +649,7 @@ class MainActivity : Activity() {
 
     private fun showLive() {
         back = { Toast.makeText(this, "Use End Session to finish", Toast.LENGTH_SHORT).show() }
+        startTs = System.currentTimeMillis()
         liveActive = true
         publishState("WAITING")
         val outer = vbox()
@@ -532,7 +742,7 @@ class MainActivity : Activity() {
         l.addView(space(10))
 
         val chips = hbox()
-        chips.addView(chip("Signal: Good", Pal.OK), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
+        chips.addView(chip("Pod " + podName, Pal.ACCENT), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
         chips.addView(chip("Battery 87%", Pal.OK), lp(WRAP, WRAP, 0f, 0, 0, 6, 0))
         val sk = chip("Skin --", Pal.MUTED)
         skinChip = sk
@@ -637,7 +847,11 @@ class MainActivity : Activity() {
                 "RESUME", "START" -> resumeInternal()
                 "END" -> if (liveActive) endSession(true)
             }
-            "hello" -> publishState(if (liveActive) (if (paused) "PAUSED" else (if (readings.isEmpty()) "WAITING" else "LIVE")) else "WAITING")
+            "hello" -> {
+                operatorLinked = true
+                refreshCodeChips()
+                publishState(if (liveActive) (if (paused) "PAUSED" else (if (readings.isEmpty()) "WAITING" else "LIVE")) else "WAITING")
+            }
         }
     }
 
@@ -711,7 +925,6 @@ class MainActivity : Activity() {
         )
         saveHistory(s)
         val copy = ArrayList(readings)
-        h.postDelayed({ link?.stop() }, 800)
         showReport(s, copy)
         if (remote) Toast.makeText(this, "Session ended", Toast.LENGTH_SHORT).show()
     }
